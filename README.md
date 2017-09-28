@@ -19,11 +19,11 @@ extern crate wex;
 
 fn main() {
   let mut api = wex::Wex::new();
-  
+
   api
     .ticker("btc_usd,eth_usd")
     .map_err(|e| println!("a buh-buh happend, {}", e))
-    .and_then(|tick| {
+    .map(|tick| {
       if let Some(info) = tick.get("btc_usd") {
         println!("{:?}", info.sell);
       }
