@@ -16,17 +16,28 @@ API implementation for the [Wex](https://wex.nz/) market-place.
 
 ```rust
 extern crate wex;
+extern crate hyper;
+extern crate hyper_tls;
+extern crate futures;
+extern crate tokio_core;
+
+use tokio_core::reactor::Core;
+use hyper::Client;
+use futures::Future;
 
 fn main() {
-  let mut api = wex::Wex::new();
+   let account = wex::Account {
+        key: String::from("<your-key>"),
+        secret: String::from("<your-secret>"),
+    };
 
-  api
-    .ticker("btc_usd,eth_usd")
-    .map_err(|e| println!("a buh-buh happend, {}", e))
-    .map(|tick| {
-      if let Some(info) = tick.get("btc_usd") {
-        println!("{:?}", info.sell);
-      }
-    });
+    let mut core = Core::new().unwrap();
+    let client = Client::configure()
+        .connector(::hyper_tls::HttpsConnector::new(4, &core.handle()).unwrap())
+        .build(&core.handle());
+
+
+    println!("{:?}", core.run(wex::info(&client)));
+    println!("{:?}", core.run(wex::get_info(&client, &account)));
 }
 ```

@@ -1,17 +1,18 @@
 //!
 //! # Wex API
-//! 
+//!
 //! API implementation for the [Wex](https://wex.nz/) market-place.
-//! 
+//!
 //! **Please Donate**
-//! 
+//!
 //! + **ETC:** 0x7bC5Ff6Bc22B4C6Af135493E6a8a11A62D209ae5
 //! + **XMR:** 49S4VziJ9v2CSkH6mP9km5SGeo3uxhG41bVYDQdwXQZzRF6mG7B4Fqv2aNEYHmQmPfJcYEnwNK1cAGLHMMmKaUWg25rHnkm
-//! 
+//!
 //! **Wex API Documentation:**
 //! + https://wex.nz/api/3/docs
 //! + https://wex.nz/tapi/docs
 //!
+#![feature(conservative_impl_trait)]
 
 extern crate crypto;
 extern crate futures;
@@ -242,407 +243,398 @@ pub enum TransactionStatus {
 pub struct TransactionHistoryEntry {
     #[serde(rename = "type")]
     kind: TransactionType,
-	amount: f64,
-	currency: String,
-	desc: String,
-	status: TransactionStatus,
-	timestamp: i64,
+    amount: f64,
+    currency: String,
+    desc: String,
+    status: TransactionStatus,
+    timestamp: i64,
 }
 
 pub type TransactionHistory = HashMap<String, TransactionHistoryEntry>;
 
-pub struct Wex {
-    core: Core,
-    client: Client<::hyper_tls::HttpsConnector<::hyper::client::HttpConnector>>,
+type HttpsClient = Client<::hyper_tls::HttpsConnector<::hyper::client::HttpConnector>>;
+
+fn public(
+    client: &HttpsClient,
+    url: &str,
+) -> impl Future<Item = hyper::Chunk, Error = hyper::Error> {
+    let work = client
+        .get(format!("https://wex.nz/api/3/{}", url).parse().unwrap())
+        .and_then(|res| res.body().concat2());
+
+    work
+}
+
+///
+/// This method provides all the information about currently active pairs,
+/// such as the maximum number of digits after the decimal point,
+/// the minimum price, the maximum price, the minimum transaction size,
+/// whether the pair is hidden, the commission for each pair.
+///
+pub fn info(client: &HttpsClient) -> impl Future<Item = Info, Error = String> {
+    public(client, "info")
+        .map_err(|e| format!("{:?}", e))
+        .and_then(|data| {
+            serde_json::from_slice(&data).map_err(|e| format!("{:?}", e))
+        })
 }
 
 
-impl Wex {
-    pub fn new() -> Wex {
-        let core = Core::new().unwrap();
-        let client = Client::configure()
-            .connector(::hyper_tls::HttpsConnector::new(4, &core.handle()).unwrap())
-            .build(&core.handle());
+pub fn ticker(client: &HttpsClient, pair: &str) -> impl Future<Item = Tick, Error = String> {
+    public(client, &format!("ticker/{}", pair))
+        .map_err(|e| format!("{:?}", e))
+        .and_then(|data| {
+            serde_json::from_slice(&data).map_err(|e| format!("{:?}", e))
+        })
+}
 
-        Wex {
-            client: client,
-            core: core,
+// ---
+
+fn private(
+    client: &HttpsClient,
+    account: &Account,
+    params: &mut HashMap<String, String>,
+) -> impl Future<Item = hyper::Chunk, Error = hyper::Error> {
+    let url = "https://wex.nz/tapi";
+    let timestamp = ::std::time::UNIX_EPOCH.elapsed().unwrap();
+    let nonce = format!("{}", timestamp.as_secs());
+
+    params.insert("nonce".to_owned(), nonce);
+
+    let mut body = params.iter().fold(
+        String::new(),
+        |data, item| data + item.0 + "=" + item.1 + "&",
+    );
+    body.pop();
+
+    let mut hmac = Hmac::new(Sha512::new(), account.secret.as_bytes());
+
+    hmac.input(body.as_bytes());
+
+
+    let mut req = ::hyper::Request::new(::hyper::Method::Post, url.parse().unwrap());
+
+    {
+        let headers = req.headers_mut();
+        let sign = hmac.result();
+
+        let mut hex = String::new();
+        for byte in sign.code() {
+            write!(&mut hex, "{:02x}", byte).expect("could not create hmac hex");
+        }
+
+        headers.set_raw("Content-type", "application/x-www-form-urlencoded");
+        headers.set_raw("Key", account.key.clone());
+        headers.set_raw("Sign", hex);
+    }
+
+    req.set_body(body);
+
+    client.request(req).and_then(|res| res.body().concat2())
+}
+
+///
+/// Returns information about the user’s current balance,
+/// API-key privileges, the number of open orders and Server Time.
+/// To use this method you need a privilege of the key info.
+///
+pub fn get_info(
+    client: &HttpsClient,
+    account: &Account,
+) -> impl Future<Item = FundInfo, Error = String> {
+    let mut params = HashMap::new();
+
+    params.insert("method".to_owned(), "getInfo".to_owned());
+
+    private(client, account, &mut params)
+        .map_err(|e| format!("{:?}", e))
+        .and_then(|r| {
+            serde_json::from_slice(&r)
+                .map_err(|e| format!("{:?}", e))
+                .and_then(|result: WexResult<FundInfo>| if result.success == 1 {
+                    Ok(result.result.unwrap())
+                } else {
+                    Err(result.error.unwrap())
+                })
+        })
+}
+
+///
+/// You can only create limit orders using this method, but you can emulate market orders using rate parameters.
+/// E.g. using rate=0.1 you can sell at the best market price.
+/// Each pair has a different limit on the minimum / maximum amounts, the minimum amount and the number of digits after the decimal point.
+/// All limitations can be obtained using the info method in PublicAPI v3.
+///
+pub fn trade(
+    client: &HttpsClient,
+    account: &Account,
+    pair: &str,
+    kind: OrderType,
+    rate: &str,
+    amount: &str,
+) -> impl Future<Item = TradeResult, Error = String> {
+    let mut params = HashMap::new();
+
+    let kind_str = match kind {
+        OrderType::Buy => String::from("buy"),
+        OrderType::Sell => String::from("sell"),
+    };
+
+    params.insert("method".to_owned(), "Trade".to_owned());
+    params.insert("pair".to_owned(), String::from(pair));
+    params.insert("type".to_owned(), kind_str);
+    params.insert("rate".to_owned(), String::from(rate));
+    params.insert("amount".to_owned(), String::from(amount));
+
+    private(client, account, &mut params)
+        .map_err(|e| format!("{:?}", e))
+        .and_then(|r| {
+            serde_json::from_slice(&r)
+                .map_err(|e| format!("{:?}", e))
+                .and_then(|result: WexResult<TradeResult>| if result.success == 1 {
+                    Ok(result.result.unwrap())
+                } else {
+                    Err(result.error.unwrap())
+                })
+        })
+}
+
+///
+/// Returns the list of your active orders.
+/// If the order disappears from the list, it was either executed or canceled.
+///
+pub fn active_orders(
+    client: &HttpsClient,
+    account: &Account,
+    pair: Option<&str>,
+) -> impl Future<Item = ActiveOrders, Error = String> {
+    let mut params = HashMap::new();
+
+    params.insert("method".to_owned(), "ActiveOrders".to_owned());
+
+    if let Some(p) = pair {
+        params.insert("pair".to_owned(), String::from(p));
+    }
+
+    private(client, account, &mut params)
+        .map_err(|e| format!("{:?}", e))
+        .and_then(|r| {
+            serde_json::from_slice(&r)
+                .map_err(|e| format!("{:?}", e))
+                .and_then(|result: WexResult<ActiveOrders>| if result.success == 1 {
+                    Ok(result.result.unwrap())
+                } else {
+                    Err(result.error.unwrap())
+                })
+        })
+}
+
+///
+/// Returns the information on particular order.
+///
+pub fn order_info(
+    client: &HttpsClient,
+    account: &Account,
+    order_id: &str,
+) -> impl Future<Item = OrderInfos, Error = String> {
+    let mut params = HashMap::new();
+
+    params.insert("method".to_owned(), "OrderInfo".to_owned());
+    params.insert("order_id".to_owned(), String::from(order_id));
+
+    private(client, account, &mut params)
+        .map_err(|e| format!("{:?}", e))
+        .and_then(|r| {
+            serde_json::from_slice(&r)
+                .map_err(|e| format!("{:?}", e))
+                .and_then(|result: WexResult<OrderInfos>| if result.success == 1 {
+                    Ok(result.result.unwrap())
+                } else {
+                    Err(result.error.unwrap())
+                })
+        })
+}
+
+///
+/// This method is used for order cancelation.
+///
+pub fn cancel_order(
+    client: &HttpsClient,
+    account: &Account,
+    order_id: &str,
+) -> impl Future<Item = CancelResult, Error = String> {
+    let mut params = HashMap::new();
+
+    params.insert("method".to_owned(), "CancelOrder".to_owned());
+    params.insert("order_id".to_owned(), String::from(order_id));
+
+    private(client, account, &mut params)
+        .map_err(|e| format!("{:?}", e))
+        .and_then(|r| {
+            serde_json::from_slice(&r)
+                .map_err(|e| format!("{:?}", e))
+                .and_then(|result: WexResult<CancelResult>| if result.success == 1 {
+                    Ok(result.result.unwrap())
+                } else {
+                    Err(result.error.unwrap())
+                })
+        })
+}
+
+///
+/// Returns trade history.
+///
+/// When using parameters since or end, the order parameter automatically assumes the value ASC.
+/// When using the since parameter the maximum time that can displayed is 1 week.
+///
+pub fn trade_history(
+    client: &HttpsClient,
+    account: &Account,
+    cfg: Option<HistoryQuery>,
+) -> impl Future<Item = TradeHistory, Error = String> {
+    let mut params = HashMap::new();
+
+    params.insert("method".to_owned(), "TradeHistory".to_owned());
+
+    if let Some(p) = cfg {
+        if let Some(from) = p.from {
+            params.insert("from".to_owned(), format!("{}", from));
+        }
+
+        if let Some(count) = p.count {
+            params.insert("count".to_owned(), format!("{}", count));
+        }
+
+        if let Some(from_id) = p.from_id {
+            params.insert("from_id".to_owned(), format!("{}", from_id));
+        }
+
+        if let Some(end_id) = p.end_id {
+            params.insert("end_id".to_owned(), format!("{}", end_id));
+        }
+
+        if let Some(order) = p.order {
+            match order {
+                TradeHistorySorting::Asc => params.insert("order".to_owned(), "asc".to_owned()),
+                TradeHistorySorting::Desc => params.insert("order".to_owned(), "desc".to_owned()),
+            };
+        }
+
+        if let Some(since) = p.since {
+            params.insert("since".to_owned(), format!("{}", since));
+        }
+
+        if let Some(end) = p.end {
+            params.insert("end".to_owned(), format!("{}", end));
+        }
+
+        if let Some(pair) = p.pair {
+            params.insert("pair".to_owned(), pair);
         }
     }
 
-    fn public(&mut self, url: &str) -> Result<::hyper::Chunk, ::hyper::Error> {
-        let work = self.client
-            .get(format!("https://wex.nz/api/3/{}", url).parse().unwrap())
-            .and_then(|res| res.body().concat2());
+    private(client, account, &mut params)
+        .map_err(|e| format!("{:?}", e))
+        .and_then(|r| {
+            serde_json::from_slice(&r)
+                .map_err(|e| format!("{:?}", e))
+                .and_then(|result: WexResult<TradeHistory>| if result.success == 1 {
+                    Ok(result.result.unwrap())
+                } else {
+                    Err(result.error.unwrap())
+                })
+        })
+}
 
-        self.core.run(work)
-    }
+pub fn trans_history(
+    client: &HttpsClient,
+    account: &Account,
+    cfg: Option<HistoryQuery>,
+) -> impl Future<Item = TransactionHistory, Error = String> {
+    let mut params = HashMap::new();
 
-    ///
-    /// This method provides all the information about currently active pairs,
-    /// such as the maximum number of digits after the decimal point,
-    /// the minimum price, the maximum price, the minimum transaction size,
-    /// whether the pair is hidden, the commission for each pair.
-    ///
-    pub fn info(&mut self) -> Result<Info, String> {
-        self.public("info")
-            .map_err(|e| format!("{:?}", e))
-            .and_then(|data| {
-                serde_json::from_slice(&data).map_err(|e| format!("{:?}", e))
-            })
-    }
+    params.insert("method".to_owned(), "TransHistory".to_owned());
 
-    pub fn ticker(&mut self, pair: &str) -> Result<Tick, String> {
-        self.public(&format!("ticker/{}", pair))
-            .map_err(|e| format!("{:?}", e))
-            .and_then(|data| {
-                serde_json::from_slice(&data).map_err(|e| format!("{:?}", e))
-            })
-    }
-
-    // ---
-
-    fn private(
-        &mut self,
-        account: &Account,
-        params: &mut HashMap<String, String>,
-    ) -> Result<hyper::Chunk, hyper::Error> {
-        let url = "https://wex.nz/tapi";
-        let timestamp = ::std::time::UNIX_EPOCH.elapsed().unwrap();
-        let nonce = format!("{}", timestamp.as_secs());
-
-        params.insert("nonce".to_owned(), nonce);
-
-        let mut body = params.iter().fold(
-            String::new(),
-            |data, item| data + item.0 + "=" + item.1 + "&",
-        );
-        body.pop();
-
-        let mut hmac = Hmac::new(Sha512::new(), account.secret.as_bytes());
-
-        hmac.input(body.as_bytes());
-
-
-        let mut req = ::hyper::Request::new(::hyper::Method::Post, url.parse().unwrap());
-
-        {
-            let headers = req.headers_mut();
-            let sign = hmac.result();
-
-            let mut hex = String::new();
-            for byte in sign.code() {
-                write!(&mut hex, "{:02x}", byte).expect("could not create hmac hex");
-            }
-
-            headers.set_raw("Content-type", "application/x-www-form-urlencoded");
-            headers.set_raw("Key", account.key.clone());
-            headers.set_raw("Sign", hex);
+    if let Some(p) = cfg {
+        if let Some(from) = p.from {
+            params.insert("from".to_owned(), format!("{}", from));
         }
 
-        req.set_body(body);
-
-        let work = self.client.request(req).and_then(
-            |res| res.body().concat2(),
-        );
-
-        self.core.run(work)
-    }
-
-    ///
-    /// Returns information about the user’s current balance,
-    /// API-key privileges, the number of open orders and Server Time.
-    /// To use this method you need a privilege of the key info.
-    ///
-    pub fn get_info(&mut self, account: &Account) -> Result<FundInfo, String> {
-        let mut params = HashMap::new();
-
-        params.insert("method".to_owned(), "getInfo".to_owned());
-
-        self.private(account, &mut params)
-            .map_err(|e| format!("{:?}", e))
-            .and_then(|r| {
-                serde_json::from_slice(&r)
-                    .map_err(|e| format!("{:?}", e))
-                    .and_then(|result: WexResult<FundInfo>| if result.success == 1 {
-                        Ok(result.result.unwrap())
-                    } else {
-                        Err(result.error.unwrap())
-                    })
-            })
-    }
-
-    ///
-    /// You can only create limit orders using this method, but you can emulate market orders using rate parameters.
-    /// E.g. using rate=0.1 you can sell at the best market price.
-    /// Each pair has a different limit on the minimum / maximum amounts, the minimum amount and the number of digits after the decimal point.
-    /// All limitations can be obtained using the info method in PublicAPI v3.
-    ///
-    pub fn trade(
-        &mut self,
-        account: &Account,
-        pair: &str,
-        kind: OrderType,
-        rate: &str,
-        amount: &str,
-    ) -> Result<TradeResult, String> {
-        let mut params = HashMap::new();
-
-        let kind_str = match kind {
-            OrderType::Buy => String::from("buy"),
-            OrderType::Sell => String::from("sell"),
-        };
-
-        params.insert("method".to_owned(), "Trade".to_owned());
-        params.insert("pair".to_owned(), String::from(pair));
-        params.insert("type".to_owned(), kind_str);
-        params.insert("rate".to_owned(), String::from(rate));
-        params.insert("amount".to_owned(), String::from(amount));
-
-        self.private(account, &mut params)
-            .map_err(|e| format!("{:?}", e))
-            .and_then(|r| {
-                serde_json::from_slice(&r)
-                    .map_err(|e| format!("{:?}", e))
-                    .and_then(|result: WexResult<TradeResult>| if result.success == 1 {
-                        Ok(result.result.unwrap())
-                    } else {
-                        Err(result.error.unwrap())
-                    })
-            })
-    }
-
-    ///
-    /// Returns the list of your active orders.
-    /// If the order disappears from the list, it was either executed or canceled.
-    ///
-    pub fn active_orders(
-        &mut self,
-        account: &Account,
-        pair: Option<&str>,
-    ) -> Result<ActiveOrders, String> {
-        let mut params = HashMap::new();
-
-        params.insert("method".to_owned(), "ActiveOrders".to_owned());
-
-        if let Some(p) = pair {
-            params.insert("pair".to_owned(), String::from(p));
+        if let Some(count) = p.count {
+            params.insert("count".to_owned(), format!("{}", count));
         }
 
-        self.private(account, &mut params)
-            .map_err(|e| format!("{:?}", e))
-            .and_then(|r| {
-                serde_json::from_slice(&r)
-                    .map_err(|e| format!("{:?}", e))
-                    .and_then(|result: WexResult<ActiveOrders>| if result.success == 1 {
-                        Ok(result.result.unwrap())
-                    } else {
-                        Err(result.error.unwrap())
-                    })
-            })
-    }
-
-    ///
-    /// Returns the information on particular order.
-    ///
-    pub fn order_info(&mut self, account: &Account, order_id: &str) -> Result<OrderInfos, String> {
-        let mut params = HashMap::new();
-
-        params.insert("method".to_owned(), "OrderInfo".to_owned());
-        params.insert("order_id".to_owned(), String::from(order_id));
-
-        self.private(account, &mut params)
-            .map_err(|e| format!("{:?}", e))
-            .and_then(|r| {
-                serde_json::from_slice(&r)
-                    .map_err(|e| format!("{:?}", e))
-                    .and_then(|result: WexResult<OrderInfos>| if result.success == 1 {
-                        Ok(result.result.unwrap())
-                    } else {
-                        Err(result.error.unwrap())
-                    })
-            })
-    }
-
-    ///
-    /// This method is used for order cancelation.
-    ///
-    pub fn cancel_order(
-        &mut self,
-        account: &Account,
-        order_id: &str,
-    ) -> Result<CancelResult, String> {
-        let mut params = HashMap::new();
-
-        params.insert("method".to_owned(), "CancelOrder".to_owned());
-        params.insert("order_id".to_owned(), String::from(order_id));
-
-        self.private(account, &mut params)
-            .map_err(|e| format!("{:?}", e))
-            .and_then(|r| {
-                serde_json::from_slice(&r)
-                    .map_err(|e| format!("{:?}", e))
-                    .and_then(|result: WexResult<CancelResult>| if result.success == 1 {
-                        Ok(result.result.unwrap())
-                    } else {
-                        Err(result.error.unwrap())
-                    })
-            })
-    }
-
-    ///
-    /// Returns trade history.
-    ///
-    /// When using parameters since or end, the order parameter automatically assumes the value ASC.
-    /// When using the since parameter the maximum time that can displayed is 1 week.
-    ///
-    pub fn trade_history(
-        &mut self,
-        account: &Account,
-        cfg: Option<HistoryQuery>,
-    ) -> Result<TradeHistory, String> {
-        let mut params = HashMap::new();
-
-        params.insert("method".to_owned(), "TradeHistory".to_owned());
-
-        if let Some(p) = cfg {
-            if let Some(from) = p.from {
-                params.insert("from".to_owned(), format!("{}", from));
-            }
-
-            if let Some(count) = p.count {
-                params.insert("count".to_owned(), format!("{}", count));
-            }
-
-            if let Some(from_id) = p.from_id {
-                params.insert("from_id".to_owned(), format!("{}", from_id));
-            }
-
-            if let Some(end_id) = p.end_id {
-                params.insert("end_id".to_owned(), format!("{}", end_id));
-            }
-
-            if let Some(order) = p.order {
-                match order {
-                    TradeHistorySorting::Asc => params.insert("order".to_owned(), "asc".to_owned()),
-                    TradeHistorySorting::Desc => {
-                        params.insert("order".to_owned(), "desc".to_owned())
-                    }
-                };
-            }
-
-            if let Some(since) = p.since {
-                params.insert("since".to_owned(), format!("{}", since));
-            }
-
-            if let Some(end) = p.end {
-                params.insert("end".to_owned(), format!("{}", end));
-            }
-
-            if let Some(pair) = p.pair {
-                params.insert("pair".to_owned(), pair);
-            }
+        if let Some(from_id) = p.from_id {
+            params.insert("from_id".to_owned(), format!("{}", from_id));
         }
 
-        self.private(account, &mut params)
-            .map_err(|e| format!("{:?}", e))
-            .and_then(|r| {
-                serde_json::from_slice(&r)
-                    .map_err(|e| format!("{:?}", e))
-                    .and_then(|result: WexResult<TradeHistory>| if result.success == 1 {
-                        Ok(result.result.unwrap())
-                    } else {
-                        Err(result.error.unwrap())
-                    })
-            })
-    }
-
-    pub fn trans_history(&mut self, account: &Account,cfg: Option<HistoryQuery>,) -> Result<TransactionHistory, String> {
-        let mut params = HashMap::new();
-
-        params.insert("method".to_owned(), "TransHistory".to_owned());
-
-        if let Some(p) = cfg {
-            if let Some(from) = p.from {
-                params.insert("from".to_owned(), format!("{}", from));
-            }
-
-            if let Some(count) = p.count {
-                params.insert("count".to_owned(), format!("{}", count));
-            }
-
-            if let Some(from_id) = p.from_id {
-                params.insert("from_id".to_owned(), format!("{}", from_id));
-            }
-
-            if let Some(end_id) = p.end_id {
-                params.insert("end_id".to_owned(), format!("{}", end_id));
-            }
-
-            if let Some(order) = p.order {
-                match order {
-                    TradeHistorySorting::Asc => params.insert("order".to_owned(), "asc".to_owned()),
-                    TradeHistorySorting::Desc => {
-                        params.insert("order".to_owned(), "desc".to_owned())
-                    }
-                };
-            }
-
-            if let Some(since) = p.since {
-                params.insert("since".to_owned(), format!("{}", since));
-            }
-
-            if let Some(end) = p.end {
-                params.insert("end".to_owned(), format!("{}", end));
-            }
-
-            if let Some(pair) = p.pair {
-                params.insert("pair".to_owned(), pair);
-            }
+        if let Some(end_id) = p.end_id {
+            params.insert("end_id".to_owned(), format!("{}", end_id));
         }
 
-        self.private(account, &mut params)
-            .map_err(|e| format!("{:?}", e))
-            .and_then(|r| {
-                serde_json::from_slice(&r)
-                    .map_err(|e| format!("{:?}", e))
-                    .and_then(|result: WexResult<TransactionHistory>| if result.success == 1 {
-                        Ok(result.result.unwrap())
-                    } else {
-                        Err(result.error.unwrap())
-                    })
-            })
+        if let Some(order) = p.order {
+            match order {
+                TradeHistorySorting::Asc => params.insert("order".to_owned(), "asc".to_owned()),
+                TradeHistorySorting::Desc => params.insert("order".to_owned(), "desc".to_owned()),
+            };
+        }
+
+        if let Some(since) = p.since {
+            params.insert("since".to_owned(), format!("{}", since));
+        }
+
+        if let Some(end) = p.end {
+            params.insert("end".to_owned(), format!("{}", end));
+        }
+
+        if let Some(pair) = p.pair {
+            params.insert("pair".to_owned(), pair);
+        }
     }
 
-    ///
-    /// This method can be used to retrieve the address for depositing crypto-currency.
-    /// 
-    /// To use this method, you need the info key privilege.
-    /// 
-    /// At present, this method does not generate new adresses. 
-    /// If you have never deposited in a particular crypto-currency and try to retrive a deposit address, 
-    /// your request will return an error, because this address has not been generated yet.
-    ///
-     pub fn coin_deposit_address(
-        &mut self,
-        account: &Account,
-        coin_name: &str,
-    ) -> Result<CancelResult, String> {
-        let mut params = HashMap::new();
+    private(client, account, &mut params)
+        .map_err(|e| format!("{:?}", e))
+        .and_then(|r| {
+            serde_json::from_slice(&r)
+                .map_err(|e| format!("{:?}", e))
+                .and_then(|result: WexResult<TransactionHistory>| if result.success ==
+                    1
+                {
+                    Ok(result.result.unwrap())
+                } else {
+                    Err(result.error.unwrap())
+                })
+        })
+}
 
-        params.insert("method".to_owned(), "CoinDepositAddress".to_owned());
-        params.insert("coinName".to_owned(), String::from(coin_name));
+///
+/// This method can be used to retrieve the address for depositing crypto-currency.
+///
+/// To use this method, you need the info key privilege.
+///
+/// At present, this method does not generate new adresses.
+/// If you have never deposited in a particular crypto-currency and try to retrive a deposit address,
+/// your request will return an error, because this address has not been generated yet.
+///
+pub fn coin_deposit_address(
+    client: &HttpsClient,
+    account: &Account,
+    coin_name: &str,
+) -> impl Future<Item = CancelResult, Error = String> {
+    let mut params = HashMap::new();
 
-        self.private(account, &mut params)
-            .map_err(|e| format!("{:?}", e))
-            .and_then(|r| {
-                serde_json::from_slice(&r)
-                    .map_err(|e| format!("{:?}", e))
-                    .and_then(|result: WexResult<CancelResult>| if result.success == 1 {
-                        Ok(result.result.unwrap())
-                    } else {
-                        Err(result.error.unwrap())
-                    })
-            })
-    }
+    params.insert("method".to_owned(), "CoinDepositAddress".to_owned());
+    params.insert("coinName".to_owned(), String::from(coin_name));
+
+    private(client, account, &mut params)
+        .map_err(|e| format!("{:?}", e))
+        .and_then(|r| {
+            serde_json::from_slice(&r)
+                .map_err(|e| format!("{:?}", e))
+                .and_then(|result: WexResult<CancelResult>| if result.success == 1 {
+                    Ok(result.result.unwrap())
+                } else {
+                    Err(result.error.unwrap())
+                })
+        })
 }
