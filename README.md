@@ -24,13 +24,7 @@ fn main() {
         secret: String::from("<your-secret>"),
     };
 
-    let mut core = Core::new().unwrap();
-    let client = Client::configure()
-        .connector(::hyper_tls::HttpsConnector::new(4, &core.handle()).unwrap())
-        .build(&core.handle());
-
-
-    println!("{:?}", core.run(wex::info(&client)));
-    println!("{:?}", core.run(wex::get_info(&client, &account)));
+    println!("{:?}", wex::info());
+    println!("{:?}", wex::get_info(&account));
 }
 ```
