@@ -5,6 +5,7 @@
 //!
 //! **Please Donate**
 //!
+//! + **BTC:** 17voJDvueb7iZtcLRrLtq3dfQYBaSi2GsU
 //! + **ETC:** 0x7bC5Ff6Bc22B4C6Af135493E6a8a11A62D209ae5
 //! + **XMR:** 49S4VziJ9v2CSkH6mP9km5SGeo3uxhG41bVYDQdwXQZzRF6mG7B4Fqv2aNEYHmQmPfJcYEnwNK1cAGLHMMmKaUWg25rHnkm
 //!
@@ -12,13 +13,8 @@
 //! + https://wex.nz/api/3/docs
 //! + https://wex.nz/tapi/docs
 //!
-#![feature(conservative_impl_trait)]
-
 extern crate crypto;
-extern crate futures;
-extern crate hyper;
-extern crate hyper_tls;
-extern crate tokio_core;
+extern crate curl;
 #[macro_use]
 extern crate serde_derive;
 extern crate serde_json;
@@ -28,9 +24,8 @@ use crypto::mac::Mac;
 use crypto::sha2::Sha512;
 use std::collections::HashMap;
 use std::fmt::Write;
-use futures::{Future, Stream};
-use hyper::Client;
-use tokio_core::reactor::Core;
+use std::io::Read;
+use curl::easy::{Easy, List};
 
 
 ///
@@ -252,17 +247,25 @@ pub struct TransactionHistoryEntry {
 
 pub type TransactionHistory = HashMap<String, TransactionHistoryEntry>;
 
-type HttpsClient = Client<::hyper_tls::HttpsConnector<::hyper::client::HttpConnector>>;
+fn public(url: &str) -> Result<Vec<u8>, String> {
+    let mut easy = Easy::new();
+    let mut dst = Vec::new();
 
-fn public(
-    client: &HttpsClient,
-    url: &str,
-) -> impl Future<Item = hyper::Chunk, Error = hyper::Error> {
-    let work = client
-        .get(format!("https://wex.nz/api/3/{}", url).parse().unwrap())
-        .and_then(|res| res.body().concat2());
+    easy.url(&format!("https://wex.nz/api/3/{}", url)).unwrap();
 
-    work
+    let result = {
+        let mut transfer = easy.transfer();
+        transfer
+            .write_function(|data| {
+                dst.extend_from_slice(data);
+                Ok(data.len())
+            })
+            .unwrap();
+
+        transfer.perform()
+    };
+
+    result.map_err(|e| format!("{:?}", e)).and_then(|x| Ok(dst))
 }
 
 ///
@@ -271,31 +274,28 @@ fn public(
 /// the minimum price, the maximum price, the minimum transaction size,
 /// whether the pair is hidden, the commission for each pair.
 ///
-pub fn info(client: &HttpsClient) -> impl Future<Item = Info, Error = String> {
-    public(client, "info")
-        .map_err(|e| format!("{:?}", e))
-        .and_then(|data| {
-            serde_json::from_slice(&data).map_err(|e| format!("{:?}", e))
-        })
+pub fn info() -> Result<Info, String> {
+    public("info").and_then(|data| {
+        serde_json::from_slice(&data).map_err(|e| format!("{:?}", e))
+    })
 }
 
 
-pub fn ticker(client: &HttpsClient, pair: &str) -> impl Future<Item = Tick, Error = String> {
-    public(client, &format!("ticker/{}", pair))
-        .map_err(|e| format!("{:?}", e))
-        .and_then(|data| {
-            serde_json::from_slice(&data).map_err(|e| format!("{:?}", e))
-        })
+pub fn ticker(pair: &str) -> Result<Tick, String> {
+    public(&format!("ticker/{}", pair)).and_then(|data| {
+        serde_json::from_slice(&data).map_err(|e| format!("{:?}", e))
+    })
 }
 
-// ---
+// // ---
 
-fn private(
-    client: &HttpsClient,
-    account: &Account,
-    params: &mut HashMap<String, String>,
-) -> impl Future<Item = hyper::Chunk, Error = hyper::Error> {
-    let url = "https://wex.nz/tapi";
+fn private(account: &Account, params: &mut HashMap<String, String>) -> Result<Vec<u8>, String> {
+    let mut dst = Vec::new();
+    let mut easy = Easy::new();
+
+    easy.url("https://wex.nz/tapi").unwrap();
+    easy.post(true).unwrap();
+
     let timestamp = ::std::time::UNIX_EPOCH.elapsed().unwrap();
     let nonce = format!("{}", timestamp.as_secs());
 
@@ -306,31 +306,46 @@ fn private(
         |data, item| data + item.0 + "=" + item.1 + "&",
     );
     body.pop();
+    let mut body_bytes = body.as_bytes();
 
     let mut hmac = Hmac::new(Sha512::new(), account.secret.as_bytes());
 
-    hmac.input(body.as_bytes());
+    hmac.input(body_bytes);
 
+    easy.post_field_size(body_bytes.len() as u64).unwrap();
 
-    let mut req = ::hyper::Request::new(::hyper::Method::Post, url.parse().unwrap());
+    let mut list = List::new();
+    let sign = hmac.result();
 
-    {
-        let headers = req.headers_mut();
-        let sign = hmac.result();
-
-        let mut hex = String::new();
-        for byte in sign.code() {
-            write!(&mut hex, "{:02x}", byte).expect("could not create hmac hex");
-        }
-
-        headers.set_raw("Content-type", "application/x-www-form-urlencoded");
-        headers.set_raw("Key", account.key.clone());
-        headers.set_raw("Sign", hex);
+    let mut hex = String::new();
+    for byte in sign.code() {
+        write!(&mut hex, "{:02x}", byte).expect("could not create hmac hex");
     }
+    list.append("Content-Type: application/x-www-form-urlencoded")
+        .unwrap();
+    list.append(&format!("Key: {}", account.key)).unwrap();
+    list.append(&format!("Sign: {}", hex)).unwrap();
 
-    req.set_body(body);
+    easy.http_headers(list).unwrap();
 
-    client.request(req).and_then(|res| res.body().concat2())
+    let result = {
+        let mut transfer = easy.transfer();
+
+        transfer
+            .read_function(|buf| Ok(body_bytes.read(buf).unwrap_or(0)))
+            .unwrap();
+
+        transfer
+            .write_function(|data| {
+                dst.extend_from_slice(data);
+                Ok(data.len())
+            })
+            .unwrap();
+
+        transfer.perform().unwrap()
+    };
+
+    Ok(dst)
 }
 
 ///
@@ -338,25 +353,20 @@ fn private(
 /// API-key privileges, the number of open orders and Server Time.
 /// To use this method you need a privilege of the key info.
 ///
-pub fn get_info(
-    client: &HttpsClient,
-    account: &Account,
-) -> impl Future<Item = FundInfo, Error = String> {
+pub fn get_info(account: &Account) -> Result<FundInfo, String> {
     let mut params = HashMap::new();
 
     params.insert("method".to_owned(), "getInfo".to_owned());
 
-    private(client, account, &mut params)
-        .map_err(|e| format!("{:?}", e))
-        .and_then(|r| {
-            serde_json::from_slice(&r)
-                .map_err(|e| format!("{:?}", e))
-                .and_then(|result: WexResult<FundInfo>| if result.success == 1 {
-                    Ok(result.result.unwrap())
-                } else {
-                    Err(result.error.unwrap())
-                })
-        })
+    private(account, &mut params).and_then(|r| {
+        serde_json::from_slice(&r)
+            .map_err(|e| format!("{:?}", e))
+            .and_then(|result: WexResult<FundInfo>| if result.success == 1 {
+                Ok(result.result.unwrap())
+            } else {
+                Err(result.error.unwrap())
+            })
+    })
 }
 
 ///
@@ -366,13 +376,12 @@ pub fn get_info(
 /// All limitations can be obtained using the info method in PublicAPI v3.
 ///
 pub fn trade(
-    client: &HttpsClient,
     account: &Account,
     pair: &str,
     kind: OrderType,
     rate: &str,
     amount: &str,
-) -> impl Future<Item = TradeResult, Error = String> {
+) -> Result<TradeResult, String> {
     let mut params = HashMap::new();
 
     let kind_str = match kind {
@@ -386,28 +395,22 @@ pub fn trade(
     params.insert("rate".to_owned(), String::from(rate));
     params.insert("amount".to_owned(), String::from(amount));
 
-    private(client, account, &mut params)
-        .map_err(|e| format!("{:?}", e))
-        .and_then(|r| {
-            serde_json::from_slice(&r)
-                .map_err(|e| format!("{:?}", e))
-                .and_then(|result: WexResult<TradeResult>| if result.success == 1 {
-                    Ok(result.result.unwrap())
-                } else {
-                    Err(result.error.unwrap())
-                })
-        })
+    private(account, &mut params).and_then(|r| {
+        serde_json::from_slice(&r)
+            .map_err(|e| format!("{:?}", e))
+            .and_then(|result: WexResult<TradeResult>| if result.success == 1 {
+                Ok(result.result.unwrap())
+            } else {
+                Err(result.error.unwrap())
+            })
+    })
 }
 
 ///
 /// Returns the list of your active orders.
 /// If the order disappears from the list, it was either executed or canceled.
 ///
-pub fn active_orders(
-    client: &HttpsClient,
-    account: &Account,
-    pair: Option<&str>,
-) -> impl Future<Item = ActiveOrders, Error = String> {
+pub fn active_orders(account: &Account, pair: Option<&str>) -> Result<ActiveOrders, String> {
     let mut params = HashMap::new();
 
     params.insert("method".to_owned(), "ActiveOrders".to_owned());
@@ -416,69 +419,55 @@ pub fn active_orders(
         params.insert("pair".to_owned(), String::from(p));
     }
 
-    private(client, account, &mut params)
-        .map_err(|e| format!("{:?}", e))
-        .and_then(|r| {
-            serde_json::from_slice(&r)
-                .map_err(|e| format!("{:?}", e))
-                .and_then(|result: WexResult<ActiveOrders>| if result.success == 1 {
-                    Ok(result.result.unwrap())
-                } else {
-                    Err(result.error.unwrap())
-                })
-        })
+    private(account, &mut params).and_then(|r| {
+        serde_json::from_slice(&r)
+            .map_err(|e| format!("{:?}", e))
+            .and_then(|result: WexResult<ActiveOrders>| if result.success == 1 {
+                Ok(result.result.unwrap())
+            } else {
+                Err(result.error.unwrap())
+            })
+    })
 }
 
 ///
 /// Returns the information on particular order.
 ///
-pub fn order_info(
-    client: &HttpsClient,
-    account: &Account,
-    order_id: &str,
-) -> impl Future<Item = OrderInfos, Error = String> {
+pub fn order_info(account: &Account, order_id: &str) -> Result<OrderInfos, String> {
     let mut params = HashMap::new();
 
     params.insert("method".to_owned(), "OrderInfo".to_owned());
     params.insert("order_id".to_owned(), String::from(order_id));
 
-    private(client, account, &mut params)
-        .map_err(|e| format!("{:?}", e))
-        .and_then(|r| {
-            serde_json::from_slice(&r)
-                .map_err(|e| format!("{:?}", e))
-                .and_then(|result: WexResult<OrderInfos>| if result.success == 1 {
-                    Ok(result.result.unwrap())
-                } else {
-                    Err(result.error.unwrap())
-                })
-        })
+    private(account, &mut params).and_then(|r| {
+        serde_json::from_slice(&r)
+            .map_err(|e| format!("{:?}", e))
+            .and_then(|result: WexResult<OrderInfos>| if result.success == 1 {
+                Ok(result.result.unwrap())
+            } else {
+                Err(result.error.unwrap())
+            })
+    })
 }
 
 ///
 /// This method is used for order cancelation.
 ///
-pub fn cancel_order(
-    client: &HttpsClient,
-    account: &Account,
-    order_id: &str,
-) -> impl Future<Item = CancelResult, Error = String> {
+pub fn cancel_order(account: &Account, order_id: &str) -> Result<CancelResult, String> {
     let mut params = HashMap::new();
 
     params.insert("method".to_owned(), "CancelOrder".to_owned());
     params.insert("order_id".to_owned(), String::from(order_id));
 
-    private(client, account, &mut params)
-        .map_err(|e| format!("{:?}", e))
-        .and_then(|r| {
-            serde_json::from_slice(&r)
-                .map_err(|e| format!("{:?}", e))
-                .and_then(|result: WexResult<CancelResult>| if result.success == 1 {
-                    Ok(result.result.unwrap())
-                } else {
-                    Err(result.error.unwrap())
-                })
-        })
+    private(account, &mut params).and_then(|r| {
+        serde_json::from_slice(&r)
+            .map_err(|e| format!("{:?}", e))
+            .and_then(|result: WexResult<CancelResult>| if result.success == 1 {
+                Ok(result.result.unwrap())
+            } else {
+                Err(result.error.unwrap())
+            })
+    })
 }
 
 ///
@@ -487,11 +476,7 @@ pub fn cancel_order(
 /// When using parameters since or end, the order parameter automatically assumes the value ASC.
 /// When using the since parameter the maximum time that can displayed is 1 week.
 ///
-pub fn trade_history(
-    client: &HttpsClient,
-    account: &Account,
-    cfg: Option<HistoryQuery>,
-) -> impl Future<Item = TradeHistory, Error = String> {
+pub fn trade_history(account: &Account, cfg: Option<HistoryQuery>) -> Result<TradeHistory, String> {
     let mut params = HashMap::new();
 
     params.insert("method".to_owned(), "TradeHistory".to_owned());
@@ -533,24 +518,21 @@ pub fn trade_history(
         }
     }
 
-    private(client, account, &mut params)
-        .map_err(|e| format!("{:?}", e))
-        .and_then(|r| {
-            serde_json::from_slice(&r)
-                .map_err(|e| format!("{:?}", e))
-                .and_then(|result: WexResult<TradeHistory>| if result.success == 1 {
-                    Ok(result.result.unwrap())
-                } else {
-                    Err(result.error.unwrap())
-                })
-        })
+    private(account, &mut params).and_then(|r| {
+        serde_json::from_slice(&r)
+            .map_err(|e| format!("{:?}", e))
+            .and_then(|result: WexResult<TradeHistory>| if result.success == 1 {
+                Ok(result.result.unwrap())
+            } else {
+                Err(result.error.unwrap())
+            })
+    })
 }
 
 pub fn trans_history(
-    client: &HttpsClient,
     account: &Account,
     cfg: Option<HistoryQuery>,
-) -> impl Future<Item = TransactionHistory, Error = String> {
+) -> Result<TransactionHistory, String> {
     let mut params = HashMap::new();
 
     params.insert("method".to_owned(), "TransHistory".to_owned());
@@ -592,19 +574,17 @@ pub fn trans_history(
         }
     }
 
-    private(client, account, &mut params)
-        .map_err(|e| format!("{:?}", e))
-        .and_then(|r| {
-            serde_json::from_slice(&r)
-                .map_err(|e| format!("{:?}", e))
-                .and_then(|result: WexResult<TransactionHistory>| if result.success ==
-                    1
-                {
-                    Ok(result.result.unwrap())
-                } else {
-                    Err(result.error.unwrap())
-                })
-        })
+    private(account, &mut params).and_then(|r| {
+        serde_json::from_slice(&r)
+            .map_err(|e| format!("{:?}", e))
+            .and_then(|result: WexResult<TransactionHistory>| if result.success ==
+                1
+            {
+                Ok(result.result.unwrap())
+            } else {
+                Err(result.error.unwrap())
+            })
+    })
 }
 
 ///
@@ -616,25 +596,19 @@ pub fn trans_history(
 /// If you have never deposited in a particular crypto-currency and try to retrive a deposit address,
 /// your request will return an error, because this address has not been generated yet.
 ///
-pub fn coin_deposit_address(
-    client: &HttpsClient,
-    account: &Account,
-    coin_name: &str,
-) -> impl Future<Item = CancelResult, Error = String> {
+pub fn coin_deposit_address(account: &Account, coin_name: &str) -> Result<CancelResult, String> {
     let mut params = HashMap::new();
 
     params.insert("method".to_owned(), "CoinDepositAddress".to_owned());
     params.insert("coinName".to_owned(), String::from(coin_name));
 
-    private(client, account, &mut params)
-        .map_err(|e| format!("{:?}", e))
-        .and_then(|r| {
-            serde_json::from_slice(&r)
-                .map_err(|e| format!("{:?}", e))
-                .and_then(|result: WexResult<CancelResult>| if result.success == 1 {
-                    Ok(result.result.unwrap())
-                } else {
-                    Err(result.error.unwrap())
-                })
-        })
+    private(account, &mut params).and_then(|r| {
+        serde_json::from_slice(&r)
+            .map_err(|e| format!("{:?}", e))
+            .and_then(|result: WexResult<CancelResult>| if result.success == 1 {
+                Ok(result.result.unwrap())
+            } else {
+                Err(result.error.unwrap())
+            })
+    })
 }
