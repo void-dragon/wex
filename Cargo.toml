@@ -4,7 +4,6 @@ version = "0.1.0"
 authors = ["Arne Simon <arne_simon@gmx.de>"]
 
 [dependencies]
-chrono = { version = "*", features = ["serde"] }
 curl = "*"
 rust-crypto = "*"
 serde = "1"
