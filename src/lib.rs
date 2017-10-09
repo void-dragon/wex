@@ -10,6 +10,7 @@
 //! + **XMR:** 49S4VziJ9v2CSkH6mP9km5SGeo3uxhG41bVYDQdwXQZzRF6mG7B4Fqv2aNEYHmQmPfJcYEnwNK1cAGLHMMmKaUWg25rHnkm
 //!
 //! **Wex API Documentation:**
+//!
 //! + https://wex.nz/api/3/docs
 //! + https://wex.nz/tapi/docs
 //!
@@ -39,14 +40,23 @@ pub struct Account {
 
 #[derive(Deserialize, Serialize, Clone, Debug)]
 pub struct TickPair {
+    /// 24h maximum price.
     pub high: f64,
+    /// 24h minimum price.
     pub low: f64,
+    /// 24h average price.
     pub avg: f64,
+    /// trade volume.
     pub vol: f64,
+    /// trade volume in currency.
     pub vol_cur: f64,
+    /// the price of the last trade.
     pub last: f64,
+    /// buy price.
     pub buy: f64,
+    /// sell price.
     pub sell: f64,
+    /// last update of cache.
     pub updated: i64,
 }
 
@@ -297,14 +307,13 @@ fn public(url: &str) -> Result<Vec<u8>, String> {
         transfer.perform()
     };
 
-    result.map_err(|e| format!("{:?}", e)).and_then(|x| Ok(dst))
+    result.map_err(|e| format!("{:?}", e)).and_then(
+        |_x| Ok(dst),
+    )
 }
 
 ///
-/// This method provides all the information about currently active pairs,
-/// such as the maximum number of digits after the decimal point,
-/// the minimum price, the maximum price, the minimum transaction size,
-/// whether the pair is hidden, the commission for each pair.
+/// This method provides all the information about currently active pairs.
 ///
 pub fn info() -> Result<Info, String> {
     public("info").and_then(|data| {
@@ -313,8 +322,21 @@ pub fn info() -> Result<Info, String> {
 }
 
 ///
+/// This method provides all the information about currently active pairs
+///
 /// # Arguments
-///     + `pair` - A string of market pairs.
+///
+/// + `pair` - A string of market pairs.
+///
+/// # Examples
+///
+/// ```rust
+/// // get ticks for btc_usd and btc_eur
+/// wex::ticker("btc_usd-btc_eur")
+///     .map(|ticks| {
+///         print!("{:?}", ticks.get("btc_usd").unwrap())
+///     })
+/// ```
 ///
 pub fn ticker(pair: &str) -> Result<Tick, String> {
     public(&format!("ticker/{}", pair)).and_then(|data| {
@@ -326,8 +348,9 @@ pub fn ticker(pair: &str) -> Result<Tick, String> {
 /// This method provides the information about active orders on the pair.
 ///
 /// # Arguments
-///     + `pair` - A string of market pairs.
-///     + `limit` - Which indicates how many orders should be displayed (150 by default).
+///
+/// + `pair` - A string of market pairs.
+/// + `limit` - Which indicates how many orders should be displayed (150 by default).
 ///
 pub fn depth(pair: &str, limit: Option<u32>) -> Result<Depths, String> {
     let mut url = format!("depth/{}", pair);
@@ -345,8 +368,9 @@ pub fn depth(pair: &str, limit: Option<u32>) -> Result<Depths, String> {
 /// This method provides the information about the last trades.
 ///
 /// # Arguments
-///     + `pair` - A string of market pairs.
-///     + `limit` - Which indicates how many orders should be displayed (150 by default).
+///
+/// + `pair` - A string of market pairs.
+/// + `limit` - Which indicates how many orders should be displayed (150 by default).
 ///
 pub fn trades(pair: &str, limit: Option<u32>) -> Result<PublicTrades, String> {
     let mut url = format!("trades/{}", pair);
@@ -418,7 +442,9 @@ fn private(account: &Account, params: &mut HashMap<String, String>) -> Result<Ve
         transfer.perform()
     };
 
-    result.map_err(|e| format!("{:?}", e)).and_then(|x| Ok(dst))
+    result.map_err(|e| format!("{:?}", e)).and_then(
+        |_x| Ok(dst),
+    )
 }
 
 ///
@@ -442,6 +468,8 @@ pub fn get_info(account: &Account) -> Result<FundInfo, String> {
     })
 }
 
+///
+/// Create orders.
 ///
 /// You can only create limit orders using this method, but you can emulate market orders using rate parameters.
 /// E.g. using rate=0.1 you can sell at the best market price.
@@ -602,6 +630,9 @@ pub fn trade_history(account: &Account, cfg: Option<HistoryQuery>) -> Result<Tra
     })
 }
 
+///
+/// Returns the history of transactions.
+///
 pub fn trans_history(
     account: &Account,
     cfg: Option<HistoryQuery>,

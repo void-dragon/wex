@@ -1,6 +1,6 @@
 # Wex API
 
-API implementation for the [Wex](https://wex.nz/) market-place.
+Full API implementation for the [Wex](https://wex.nz/) market-place.
 
 **Please Donate**
 
@@ -26,5 +26,18 @@ fn main() {
 
     println!("{:?}", wex::info());
     println!("{:?}", wex::get_info(&account));
+
+    // currency pair chain :)
+
+    let info = wex::info().expect("could not optain wex pairs");
+    let pairs: Vec<&String> = info.pairs.keys().collect();
+    let mut pairchain = pairs.iter().fold(
+        String::new(),
+        |data, item| data + item + "-",
+    );
+    pairchain.pop(); // remove last `-`
+
+    // ticker all pairs at once :D
+    let ticks = wex::ticker(&pairchain).expect("could not ticker");
 }
 ```
