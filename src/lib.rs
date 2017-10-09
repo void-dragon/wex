@@ -53,6 +53,38 @@ pub struct TickPair {
 pub type Tick = HashMap<String, TickPair>;
 
 #[derive(Deserialize, Serialize, Clone, Debug)]
+pub struct Depth {
+    asks: Vec<Vec<f64>>,
+    bids: Vec<Vec<f64>>,
+}
+
+pub type Depths = HashMap<String, Depth>;
+
+#[derive(Deserialize, Serialize, Clone, Debug)]
+#[serde(rename_all = "lowercase")]
+pub enum PublicTradeKind {
+    Ask,
+    Bid,
+}
+
+#[derive(Deserialize, Serialize, Clone, Debug)]
+pub struct PublicTrade {
+    /// ask – Sell, bid – Buy.
+    #[serde(rename = "type")]
+    kind: PublicTradeKind,
+    /// Buy price/Sell price
+    price: f64,
+    /// the amount of asset bought/sold.
+    amount: f64,
+    /// trade ID.
+    tid: u32,
+    /// UNIX time of the trade.
+    timestamp: i64,
+}
+
+pub type PublicTrades = HashMap<String, Vec<PublicTrade>>;
+
+#[derive(Deserialize, Serialize, Clone, Debug)]
 pub struct InfoPair {
     pub decimal_places: u32,
     pub min_price: f64,
@@ -280,9 +312,50 @@ pub fn info() -> Result<Info, String> {
     })
 }
 
-
+///
+/// # Arguments
+///     + `pair` - A string of market pairs.
+///
 pub fn ticker(pair: &str) -> Result<Tick, String> {
     public(&format!("ticker/{}", pair)).and_then(|data| {
+        serde_json::from_slice(&data).map_err(|e| format!("{:?}", e))
+    })
+}
+
+///
+/// This method provides the information about active orders on the pair.
+///
+/// # Arguments
+///     + `pair` - A string of market pairs.
+///     + `limit` - Which indicates how many orders should be displayed (150 by default).
+///
+pub fn depth(pair: &str, limit: Option<u32>) -> Result<Depths, String> {
+    let mut url = format!("depth/{}", pair);
+
+    if let Some(l) = limit {
+        url = format!("{}?limit={}", url, l);
+    }
+
+    public(&url).and_then(|data| {
+        serde_json::from_slice(&data).map_err(|e| format!("{:?}", e))
+    })
+}
+
+///
+/// This method provides the information about the last trades.
+///
+/// # Arguments
+///     + `pair` - A string of market pairs.
+///     + `limit` - Which indicates how many orders should be displayed (150 by default).
+///
+pub fn trades(pair: &str, limit: Option<u32>) -> Result<PublicTrades, String> {
+    let mut url = format!("trades/{}", pair);
+
+    if let Some(l) = limit {
+        url = format!("{}?limit={}", url, l);
+    }
+
+    public(&url).and_then(|data| {
         serde_json::from_slice(&data).map_err(|e| format!("{:?}", e))
     })
 }
@@ -342,10 +415,10 @@ fn private(account: &Account, params: &mut HashMap<String, String>) -> Result<Ve
             })
             .unwrap();
 
-        transfer.perform().unwrap()
+        transfer.perform()
     };
 
-    Ok(dst)
+    result.map_err(|e| format!("{:?}", e)).and_then(|x| Ok(dst))
 }
 
 ///
