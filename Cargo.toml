@@ -2,6 +2,8 @@
 name = "wex"
 version = "0.1.0"
 authors = ["Arne Simon <arne_simon@gmx.de>"]
+description = "REST API for the WEX market place."
+license = "MIT"
 
 [dependencies]
 curl = "*"
