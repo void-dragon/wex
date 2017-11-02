@@ -4,6 +4,9 @@ version = "0.1.0"
 authors = ["Arne Simon <arne_simon@gmx.de>"]
 description = "REST API for the WEX market place."
 license = "MIT"
+documentation = "https://docs.rs/wex"
+homepage = "https://github.com/void-dragon/wex"
+repository = "https://github.com/void-dragon/wex"
 
 [dependencies]
 curl = "0.4.8"
