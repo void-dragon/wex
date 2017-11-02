@@ -12,7 +12,7 @@ Full API implementation for the [Wex](https://wex.nz/) market-place.
 + https://wex.nz/api/3/docs
 + https://wex.nz/tapi/docs
 
-**Documentation:**  https://docs.rs/wex/badge.svg
+**Documentation:**  https://docs.rs/wex/ ![](https://docs.rs/wex/badge.svg)
 
 ## Example
 
