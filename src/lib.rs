@@ -171,13 +171,13 @@ pub struct FundInfo {
 #[derive(Deserialize, Serialize, Clone, Debug)]
 pub struct TradeResult {
     /// The amount of currency bought/sold.
-    received: f64,
+    pub received: f64,
     /// The remaining amount of currency to be bought/sold (and the initial order amount).
-    remains: f64,
+    pub remains: f64,
     /// Is equal to 0 if the request was fully “matched” by the opposite orders, otherwise the ID of the executed order will be returned.
-    order_id: u64,
+    pub order_id: u64,
     /// Balance after the request.
-    funds: HashMap<String, f64>,
+    pub funds: HashMap<String, f64>,
 }
 
 #[derive(Deserialize, Serialize, Clone, Debug)]
