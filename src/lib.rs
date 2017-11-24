@@ -45,6 +45,7 @@
 //!
 extern crate crypto;
 extern crate curl;
+extern crate serde;
 #[macro_use]
 extern crate serde_derive;
 extern crate serde_json;
@@ -53,6 +54,7 @@ use crypto::hmac::Hmac;
 use crypto::mac::Mac;
 use crypto::sha2::Sha512;
 use std::collections::HashMap;
+use std::fmt;
 use std::fmt::Write;
 use std::io::Read;
 use curl::easy::{Easy, List};
@@ -187,13 +189,63 @@ pub enum OrderType {
     Buy,
 }
 
-#[derive(Deserialize, Serialize, Clone, Debug)]
-pub enum OrderStatus {
+
+macro_rules! enum_number {
+    ($name:ident { $($variant:ident = $value:expr, )* }) => {
+        #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+        pub enum $name {
+            $($variant = $value,)*
+        }
+
+        impl ::serde::Serialize for $name {
+            fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+                where S: ::serde::Serializer
+            {
+                // Serialize the enum as a u64.
+                serializer.serialize_u64(*self as u64)
+            }
+        }
+
+        impl<'de> ::serde::Deserialize<'de> for $name {
+            fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+                where D: ::serde::Deserializer<'de>
+            {
+                struct Visitor;
+
+                impl<'de> ::serde::de::Visitor<'de> for Visitor {
+                    type Value = $name;
+
+                    fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+                        formatter.write_str("positive integer")
+                    }
+
+                    fn visit_u64<E>(self, value: u64) -> Result<$name, E>
+                        where E: ::serde::de::Error
+                    {
+                        // Rust does not come with a simple way of converting a
+                        // number to an enum, so use a big `match`.
+                        match value {
+                            $( $value => Ok($name::$variant), )*
+                            _ => Err(E::custom(
+                                format!("unknown {} value: {}",
+                                stringify!($name), value))),
+                        }
+                    }
+                }
+
+                // Deserialize the enum from a u64.
+                deserializer.deserialize_u64(Visitor)
+            }
+        }
+    }
+}
+
+enum_number!(OrderStatus {
     Active = 0,
     ExecutedOrder = 1,
     Canceled = 2,
     PartiallyExecuted = 3,
-}
+});
 
 #[derive(Deserialize, Serialize, Clone, Debug)]
 pub struct ActiveOrder {
@@ -551,7 +603,7 @@ pub fn active_orders(account: &Account, pair: Option<&str>) -> Result<ActiveOrde
 
     private(account, &mut params).and_then(|r| {
         serde_json::from_slice(&r)
-            .map_err(|e| format!("{:?}", e))
+            .map_err(|e| format!("{:?}\n{}", e, String::from_utf8(r).unwrap()))
             .and_then(|result: WexResult<ActiveOrders>| if result.success == 1 {
                 Ok(result.result.unwrap())
             } else {
