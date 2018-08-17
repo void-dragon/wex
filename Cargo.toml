@@ -1,6 +1,6 @@
 [package]
 name = "wex"
-version = "0.1.1"
+version = "0.1.2"
 authors = ["Arne Simon <arne_simon@gmx.de>"]
 description = "REST API for the WEX market place."
 license = "MIT"
