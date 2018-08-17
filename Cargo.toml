@@ -9,7 +9,7 @@ homepage = "https://github.com/void-dragon/wex"
 repository = "https://github.com/void-dragon/wex"
 
 [dependencies]
-curl = "0.4.8"
+curl = "0.4.14"
 rust-crypto = "0.2.36"
 serde = "1"
 serde_derive = "1"
